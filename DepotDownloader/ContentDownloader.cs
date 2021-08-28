@@ -51,7 +51,7 @@ namespace DepotDownloader
             }
         }
 
-        static bool CreateDirectories( uint appId, string appName, uint depotId, uint depotVersion, string contentName, out string installDir )
+        static bool CreateDirectories( uint appId, uint depotId, uint depotVersion, string contentName, out string installDir )
         {
             installDir = null;
             try
@@ -210,7 +210,7 @@ namespace DepotDownloader
             return uint.Parse( buildid.Value );
         }
 
-        static ulong GetSteam3DepotManifest( uint depotId, uint appId, string branch )
+        static ulong GetSteam3DepotManifest( uint depotId, uint appId, string branch, ulong AppTokenParameter )
         {
             KeyValue depots = GetSteam3AppSection( appId, EAppInfoSection.Depots );
             KeyValue depotChild = depots[ depotId.ToString() ];
@@ -232,9 +232,10 @@ namespace DepotDownloader
                     return INVALID_MANIFEST_ID;
                 }
 
-                steam3.RequestAppInfo( otherAppId );
+                steam3.RequestAppInfo( otherAppId, AppTokenParameter );
+                
 
-                return GetSteam3DepotManifest( depotId, otherAppId, branch );
+                return GetSteam3DepotManifest( depotId, otherAppId, branch, AppTokenParameter );
             }
 
             var manifests = depotChild[ "manifests" ];
@@ -395,7 +396,7 @@ namespace DepotDownloader
 
             if ( details.hcontent_file > 0 )
             {
-                await DownloadAppAsync( details.consumer_appid, details.consumer_appid, details.hcontent_file, DEFAULT_BRANCH, null, true );
+                await DownloadAppAsync( details.consumer_appid, details.consumer_appid, details.hcontent_file, DEFAULT_BRANCH, null, true, 0 );
             }
             else
             {
@@ -403,7 +404,7 @@ namespace DepotDownloader
             }
         }
 
-        public static async Task DownloadAppAsync( uint appId, uint depotId, ulong manifestId, string branch, string os, bool isUgc )
+        public static async Task DownloadAppAsync( uint appId, uint depotId, ulong manifestId, string branch, string os, bool isUgc, ulong AppTokenParameter )
         {
             // Load our configuration data containing the depots currently installed
             string configPath = ContentDownloader.Config.InstallDirectory;
@@ -416,7 +417,7 @@ namespace DepotDownloader
             DepotConfigStore.LoadFromFile(Path.Combine(configPath, CONFIG_DIR, "depot.config"));
 
             if ( steam3 != null )
-                steam3.RequestAppInfo( appId );
+                steam3.RequestAppInfo( appId, AppTokenParameter );
 
             /*if ( !AccountHasAccess( appId ) )
             {
@@ -488,7 +489,7 @@ namespace DepotDownloader
 
             foreach ( var depot in depotIDs )
             {
-                var info = GetDepotInfo( depot, appId, manifestId, branch );
+                var info = GetDepotInfo( depot, appId, manifestId, branch, AppTokenParameter );
                 if ( info != null )
                 {
                     infos.Add( info );
@@ -506,10 +507,10 @@ namespace DepotDownloader
             }
         }
 
-        static DepotDownloadInfo GetDepotInfo( uint depotId, uint appId, ulong manifestId, string branch )
+        static DepotDownloadInfo GetDepotInfo( uint depotId, uint appId, ulong manifestId, string branch, ulong AppTokenParameter )
         {
             if ( steam3 != null && appId != INVALID_APP_ID )
-                steam3.RequestAppInfo( ( uint )appId );
+                steam3.RequestAppInfo( ( uint )appId, AppTokenParameter );
 
             string contentName = GetAppOrDepotName( depotId, appId );
 
@@ -518,12 +519,12 @@ namespace DepotDownloader
 
             if (manifestId == INVALID_MANIFEST_ID)
             {
-                manifestId = GetSteam3DepotManifest(depotId, appId, branch);
+                manifestId = GetSteam3DepotManifest(depotId, appId, branch, AppTokenParameter);
                 if (manifestId == INVALID_MANIFEST_ID && branch != "public")
                 {
                     Console.WriteLine("Warning: Depot {0} does not have branch named \"{1}\". Trying public branch.", depotId, branch);
                     branch = "public";
-                    manifestId = GetSteam3DepotManifest(depotId, appId, branch);
+                    manifestId = GetSteam3DepotManifest(depotId, appId, branch, AppTokenParameter);
                 }
 
                 if (manifestId == INVALID_MANIFEST_ID)
@@ -536,7 +537,7 @@ namespace DepotDownloader
             uint uVersion = GetSteam3AppBuildNumber( appId, branch );
 
             string installDir;
-            if ( !CreateDirectories( appId, appName, depotId, uVersion, contentName, out installDir ) )
+            if ( !CreateDirectories( appId, depotId, uVersion, contentName, out installDir ) )
             {
                 Console.WriteLine( "Error: Unable to create install directories!" );
                 return null;
