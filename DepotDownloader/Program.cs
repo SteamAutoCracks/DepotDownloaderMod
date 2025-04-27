@@ -24,6 +24,8 @@ namespace DepotDownloader
     }
     class Program
     {
+        private static bool[] consumedArgs;
+
         static async Task<int> Main(string[] args)
         {
             if (args.Length == 0)
@@ -54,6 +56,8 @@ namespace DepotDownloader
                 return 0;
             }
 
+            consumedArgs = new bool[args.Length];
+
             if (HasParameter(args, "-debug"))
             {
                 PrintVersion(true);
@@ -77,20 +81,20 @@ namespace DepotDownloader
 
             ContentDownloader.Config.RememberPassword = HasParameter(args, "-remember-password");
             ContentDownloader.Config.UseQrCode = HasParameter(args, "-qr");
+            ContentDownloader.Config.SkipAppConfirmation = HasParameter(args, "-no-mobile");
 
             if (username == null)
             {
-                if (ContentDownloader.Config.RememberPassword)
+                if (ContentDownloader.Config.RememberPassword && !ContentDownloader.Config.UseQrCode)
                 {
-                    Console.WriteLine("Error: -remember-password can not be used without -username.");
+                    Console.WriteLine("Error: -remember-password can not be used without -username or -qr.");
                     return 1;
                 }
-
-                if (ContentDownloader.Config.UseQrCode)
-                {
-                    Console.WriteLine("Error: -qr can not be used without -username.");
-                    return 1;
-                }
+            }
+            else if (ContentDownloader.Config.UseQrCode)
+            {
+                Console.WriteLine("Error: -qr can not be used with -username.");
+                return 1;
             }
 
             ContentDownloader.Config.DownloadManifestOnly = HasParameter(args, "-manifest-only");
@@ -203,6 +207,8 @@ namespace DepotDownloader
             {
                 #region Pubfile Downloading
 
+                PrintUnconsumedArgs(args);
+
                 if (InitializeSteam(username, password))
                 {
                     try
@@ -237,6 +243,8 @@ namespace DepotDownloader
             else if (ugcId != ContentDownloader.INVALID_MANIFEST_ID)
             {
                 #region UGC Downloading
+
+                PrintUnconsumedArgs(args);
 
                 if (InitializeSteam(username, password))
                 {
@@ -275,6 +283,12 @@ namespace DepotDownloader
 
                 var branch = GetParameter<string>(args, "-branch") ?? GetParameter<string>(args, "-beta") ?? ContentDownloader.DEFAULT_BRANCH;
                 ContentDownloader.Config.BetaPassword = GetParameter<string>(args, "-branchpassword") ?? GetParameter<string>(args, "-betapassword");
+
+                if (!string.IsNullOrEmpty(ContentDownloader.Config.BetaPassword) && string.IsNullOrEmpty(branch))
+                {
+                    Console.WriteLine("Error: Cannot specify -branchpassword when -branch is not specified.");
+                    return 1;
+                }
 
                 ContentDownloader.Config.DownloadAllPlatforms = HasParameter(args, "-all-platforms");
 
@@ -327,6 +341,8 @@ namespace DepotDownloader
                 {
                     depotManifestIds.AddRange(depotIdList.Select(depotId => (depotId, ContentDownloader.INVALID_MANIFEST_ID)));
                 }
+
+                PrintUnconsumedArgs(args);
 
                 if (InitializeSteam(username, password))
                 {
@@ -414,7 +430,10 @@ namespace DepotDownloader
             for (var x = 0; x < args.Length; ++x)
             {
                 if (args[x].Equals(param, StringComparison.OrdinalIgnoreCase))
+                {
+                    consumedArgs[x] = true;
                     return x;
+                }
             }
 
             return -1;
@@ -437,6 +456,7 @@ namespace DepotDownloader
             var converter = TypeDescriptor.GetConverter(typeof(T));
             if (converter != null)
             {
+                consumedArgs[index + 1] = true;
                 return (T)converter.ConvertFromString(strParam);
             }
 
@@ -462,6 +482,7 @@ namespace DepotDownloader
                 var converter = TypeDescriptor.GetConverter(typeof(T));
                 if (converter != null)
                 {
+                    consumedArgs[index] = true;
                     list.Add((T)converter.ConvertFromString(strParam));
                 }
 
@@ -469,6 +490,26 @@ namespace DepotDownloader
             }
 
             return list;
+        }
+
+        static void PrintUnconsumedArgs(string[] args)
+        {
+            var printError = false;
+
+            for (var index = 0; index < consumedArgs.Length; index++)
+            {
+                if (!consumedArgs[index])
+                {
+                    printError = true;
+                    Console.Error.WriteLine($"Argument #{index + 1} {args[index]} was not used.");
+                }
+            }
+
+            if (printError)
+            {
+                Console.Error.WriteLine("Make sure you specified the arguments correctly. Check --help for correct arguments.");
+                Console.Error.WriteLine();
+            }
         }
 
         static void PrintUsage()
@@ -505,6 +546,8 @@ namespace DepotDownloader
             Console.WriteLine("  -password <pass>         - the password of the account to login to for restricted content.");
             Console.WriteLine("  -remember-password       - if set, remember the password for subsequent logins of this user.");
             Console.WriteLine("                             use -username <username> -remember-password as login credentials.");
+            Console.WriteLine("  -qr                      - display a login QR code to be scanned with the Steam mobile app");
+            Console.WriteLine("  -no-mobile               - prefer entering a 2FA code instead of prompting to accept in the Steam mobile app");
             Console.WriteLine();
             Console.WriteLine("  -dir <installdir>        - the directory in which to place downloaded files.");
             Console.WriteLine("  -filelist <file.txt>     - the name of a local file that contains a list of files to download (from the manifest).");

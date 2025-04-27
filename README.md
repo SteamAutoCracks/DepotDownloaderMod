@@ -49,7 +49,7 @@ Parameter               | Description
 `-manifest <id>`		| manifest id of content to download (requires `-depot`, default: current for branch).
 `-ugc <#>`				| the UGC ID to download.
 `-branch <branchname>`	| download from specified branch if available (default: Public).
-`-branchpassword <pass>`    | branch password if applicable.
+`-branchpassword <pass>`| branch password if applicable.
 `-all-platforms`		| downloads all platform-specific depots when `-app` is used.
 `-os <os>`				| the operating system for which to download the game (windows, macos or linux, default: OS the program is currently running on)
 `-osarch <arch>`		| the architecture for which to download the game (32 or 64, default: the host's architecture)
@@ -60,6 +60,8 @@ Parameter               | Description
 `-pubfile <#>`			| the PublishedFileId to download. (Will automatically resolve to UGC id)
 `-username <user>`		| the username of the account to login to for restricted content.
 `-password <pass>`		| the password of the account to login to for restricted content.
+`-qr`                   | display a login QR code to be scanned with the Steam mobile app
+`-no-mobile`            | prefer entering a 2FA code instead of prompting to accept in the Steam mobile app.
 `-remember-password`	| if set, remember the password for subsequent logins of this user. (Use `-username <username> -remember-password` as login credentials)
 `-depotkeys <depotkeysfile>`  | a list of depot keys to use ('depotID;hexKey' per line)
 `-manifestfile <manifestfile>`| Use Specified Manifest file from Steam.
