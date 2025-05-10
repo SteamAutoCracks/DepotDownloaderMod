@@ -34,6 +34,6 @@ namespace DepotDownloader
         public bool SkipAppConfirmation { get; set; }
 
         public bool UseManifestFile { get; set; }
-        public string ManifestFile { get; set; }
+        public Dictionary<uint, string> ManifestFile { get; set; }
     }
 }
