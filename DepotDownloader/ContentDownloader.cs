@@ -241,17 +241,10 @@ namespace DepotDownloader
                 return INVALID_MANIFEST_ID;
 
             // Either the branch just doesn't exist, or it has a password
-            var password = Config.BetaPassword;
-
-            if (string.IsNullOrEmpty(password))
+            if (string.IsNullOrEmpty(Config.BetaPassword))
             {
-                Console.WriteLine($"Branch {branch} was not found, either it does not exist or it has a password.");
-            }
-
-            while (string.IsNullOrEmpty(password))
-            {
-                Console.Write($"Please enter the password for branch {branch}: ");
-                Config.BetaPassword = password = Console.ReadLine();
+                Console.WriteLine($"Branch {branch} for depot {depotId} was not found, either it does not exist or it has a password.");
+                return INVALID_MANIFEST_ID;
             }
 
             if (!steam3.AppBetaPasswords.ContainsKey(branch))
@@ -259,7 +252,7 @@ namespace DepotDownloader
                 // Submit the password to Steam now to get encryption keys
                 await steam3.CheckAppBetaPassword(appId, Config.BetaPassword);
 
-                if (!steam3.AppBetaPasswords.TryGetValue(branch, out var appBetaPassword))
+                if (!steam3.AppBetaPasswords.ContainsKey(branch))
                 {
                     Console.WriteLine($"Error: Password was invalid for branch {branch} (or the branch does not exist)");
                     return INVALID_MANIFEST_ID;
@@ -427,7 +420,7 @@ namespace DepotDownloader
             /*
             if (!await AccountHasAccess(appId))
             {
-                if (await steam3.RequestFreeAppLicense(appId))
+                if (steam3.steamUser.SteamID.AccountType != EAccountType.AnonUser && await steam3.RequestFreeAppLicense(appId))
                 {
                     Console.WriteLine("Obtained FreeOnDemand license for app {0}", appId);
 
@@ -543,6 +536,7 @@ namespace DepotDownloader
                     infos.Add(info);
                 }
             }
+            Console.WriteLine();
 
             try
             {
