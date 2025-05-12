@@ -737,7 +737,7 @@ namespace DepotDownloader
             if (Config.UseManifestFile)
             {
                 lastManifestId = depot.ManifestId;
-                oldManifest = DepotManifest.LoadFromFile(Config.ManifestFile);
+                oldManifest = DepotManifest.LoadFromFile(Config.ManifestFile[depot.DepotId]);
                 if (oldManifest.FilenamesEncrypted)
                 {
                     if (!oldManifest.DecryptFilenames(depot.DepotKey))

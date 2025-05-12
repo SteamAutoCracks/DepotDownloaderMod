@@ -190,7 +190,17 @@ namespace DepotDownloader
             ContentDownloader.Config.MaxDownloads = GetParameter(args, "-max-downloads", 8);
             ContentDownloader.Config.LoginID = HasParameter(args, "-loginid") ? GetParameter<uint>(args, "-loginid") : null;
             ContentDownloader.Config.UseManifestFile = HasParameter(args, "-manifestfile");
-            ContentDownloader.Config.ManifestFile = GetParameter<string>(args, "-manifestfile");
+            if (ContentDownloader.Config.UseManifestFile)
+            {
+                var depotIdList = GetParameterList<uint>(args, "-depot");
+                var manifestfiles = GetParameterList<string>(args, "-manifestfile");
+                if (depotIdList.Count != manifestfiles.Count)
+                {
+                    Console.WriteLine("Error: -depot count not equal -manifestfile count!");
+                    return 1;
+                }
+                ContentDownloader.Config.ManifestFile = depotIdList.Zip(manifestfiles).ToDictionary(x => x.First, x => x.Second);
+            }
 
             #endregion
 
