@@ -29,9 +29,7 @@ namespace DepotDownloader
 
         static async ValueTask<Stream> IPv4ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
         {
-            // By default, we create dual-mode sockets:
-            // Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-
+            // 强制使用 IPv4
             var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
             {
                 NoDelay = true

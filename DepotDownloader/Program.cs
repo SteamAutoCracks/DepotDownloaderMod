@@ -8,6 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using SteamKit2;
@@ -25,6 +27,13 @@ namespace DepotDownloader
     class Program
     {
         private static bool[] consumedArgs;
+
+        private static readonly JsonSerializerOptions InfoJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
 
         static async Task<int> Main(string[] args)
         {
@@ -45,10 +54,38 @@ namespace DepotDownloader
 
             DebugLog.Enabled = false;
 
-            AccountSettingsStore.LoadFromFile("account.config");
+            // 获取 exe 所在目录，确保配置文件路径不受外部程序工作目录影响
+            var exeDir = AppContext.BaseDirectory;
+
+            AccountSettingsStore.LoadFromFile(Path.Combine(exeDir, "account.config"));
+
+            // 加载 App Access Token 配置文件
+            AppAccessTokenManager.Load(Path.Combine(exeDir, "appaccesstokens.json"));
+
+            // 自动加载 depotkeys.json（如果存在），读取逻辑由 DepotKeyStore 内部处理
+            DepotKeyStore.LoadFromFile(Path.Combine(exeDir, "depotkeys.json"));
+
+            // 加载 Request Code 配置文件，并初始化 ManifestRequestCodeProvider
+            try
+            {
+                var requestCodePath = Path.Combine(exeDir, "requestcode.json");
+                if (File.Exists(requestCodePath))
+                {
+                    var json = File.ReadAllText(requestCodePath);
+                    var config = System.Text.Json.JsonSerializer.Deserialize<RequestCodeConfig>(json);
+                    if (config != null)
+                    {
+                        ManifestRequestCodeProvider.Initialize(config);
+                        Console.Error.WriteLine("Loaded request codes from 'requestcode.json'.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Warning: Unable to load requestcode.json: {0}", ex.Message);
+            }
 
             #region Common Options
-
             // Not using HasParameter because it is case insensitive
             if (args.Length == 1 && (args[0] == "-V" || args[0] == "--version"))
             {
@@ -57,6 +94,13 @@ namespace DepotDownloader
             }
 
             consumedArgs = new bool[args.Length];
+
+            ContentDownloader.Config.JsonOutput = HasParameter(args, "-json") || HasParameter(args, "--json");
+            if (ContentDownloader.Config.JsonOutput)
+            {
+                JsonEventEmitter.Out = Console.Out;
+                Console.SetOut(Console.Error);
+            }
 
             if (HasParameter(args, "-debug"))
             {
@@ -108,7 +152,6 @@ namespace DepotDownloader
             ContentDownloader.Config.CellID = cellId;
 
             var fileList = GetParameter<string>(args, "-filelist");
-
             if (fileList != null)
             {
                 const string RegexPrefix = "regex:";
@@ -146,19 +189,18 @@ namespace DepotDownloader
                     Console.WriteLine("Warning: Unable to load filelist: {0}", ex);
                 }
             }
-            
-            string depotKeysList = GetParameter<string>(args, "-depotkeys");
 
+            var depotKeysList = GetParameter<string>(args, "-depotkeys");
 
             if (depotKeysList != null)
             {
                 try
                 {
-                    string depotKeysListData = File.ReadAllText(depotKeysList);
-                    string[] lines = depotKeysListData.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    var depotKeysListData = File.ReadAllText(depotKeysList);
+                    var lines = depotKeysListData.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
 
                     DepotKeyStore.AddAll(lines);
-                    
+
                     Console.WriteLine("Using depot keys from '{0}'.", depotKeysList);
                 }
                 catch (Exception ex)
@@ -178,8 +220,6 @@ namespace DepotDownloader
                 {
                     Console.WriteLine("Detected Lancache server! Downloads will be directed through the Lancache.");
 
-                    // Increasing the number of concurrent downloads when the cache is detected since the downloads will likely
-                    // be served much faster than over the internet.  Steam internally has this behavior as well.
                     if (!HasParameter(args, "-max-downloads"))
                     {
                         ContentDownloader.Config.MaxDownloads = 25;
@@ -189,9 +229,74 @@ namespace DepotDownloader
 
             ContentDownloader.Config.MaxDownloads = GetParameter(args, "-max-downloads", 8);
             ContentDownloader.Config.LoginID = HasParameter(args, "-loginid") ? GetParameter<uint>(args, "-loginid") : null;
-            ContentDownloader.Config.UseManifestFile = HasParameter(args, "-manifestfile");
-            ContentDownloader.Config.ManifestFile = GetParameter<string>(args, "-manifestfile");
+            ContentDownloader.Config.ManifestDirectory = GetParameter<string>(args, "-manifest-dir");
 
+            #endregion
+
+            #region App Info Query (read-only, no download)
+            var infoIndex = -1;
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (!consumedArgs[i] && args[i].Equals("info", StringComparison.OrdinalIgnoreCase))
+                {
+                    infoIndex = i;
+                    break;
+                }
+            }
+
+            if (infoIndex >= 0)
+            {
+                consumedArgs[infoIndex] = true;
+
+                var infoAppId = GetParameter<uint>(args, "--app", ContentDownloader.INVALID_APP_ID);
+                if (infoAppId == ContentDownloader.INVALID_APP_ID)
+                {
+                    infoAppId = GetParameter<uint>(args, "-app", ContentDownloader.INVALID_APP_ID);
+                }
+
+                if (infoAppId == ContentDownloader.INVALID_APP_ID)
+                {
+                    await Console.Error.WriteLineAsync("Error: info subcommand requires --app <id>");
+                    return 1;
+                }
+
+                PrintUnconsumedArgs(args);
+
+                if (InitializeSteam(username, password))
+                {
+                    try
+                    {
+                        var queryResult = await ContentDownloader.QueryAppInfoAsync(infoAppId);
+                        var json = JsonSerializer.Serialize(queryResult, InfoJsonOptions);
+                        JsonEventEmitter.Out.WriteLine(json);
+                        return queryResult.Success ? 0 : 1;
+                    }
+                    catch (ContentDownloaderException ex)
+                    {
+                        await Console.Error.WriteLineAsync(ex.Message);
+                        return 1;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        await Console.Error.WriteLineAsync(ex.Message);
+                        return 1;
+                    }
+                    catch (Exception e)
+                    {
+                        await Console.Error.WriteLineAsync($"App info query failed due to an unhandled exception: {e.Message}");
+                        throw;
+                    }
+                    finally
+                    {
+                        ContentDownloader.ShutdownSteam3();
+                    }
+                }
+                else
+                {
+                    await Console.Error.WriteLineAsync("Error: InitializeSteam failed");
+                    return 2;
+                }
+            }
             #endregion
 
             var appId = GetParameter(args, "-app", ContentDownloader.INVALID_APP_ID);
@@ -324,22 +429,24 @@ namespace DepotDownloader
                 var depotManifestIds = new List<(uint, ulong)>();
                 var isUGC = false;
 
-                var depotIdList = GetParameterList<uint>(args, "-depot");
-                var manifestIdList = GetParameterList<ulong>(args, "-manifest");
-                if (manifestIdList.Count > 0)
+                var depotRefs = GetParameterList<string>(args, "-depot");
+                foreach (var depotRef in depotRefs)
                 {
-                    if (depotIdList.Count != manifestIdList.Count)
+                    var colonIdx = depotRef.IndexOf(':');
+                    if (colonIdx > 0 && ulong.TryParse(depotRef.AsSpan(colonIdx + 1), out var explicitManifestId))
                     {
-                        Console.WriteLine("Error: -manifest requires one id for every -depot specified");
-                        return 1;
+                        if (uint.TryParse(depotRef.AsSpan(0, colonIdx), out var refDepotId))
+                        {
+                            depotManifestIds.Add((refDepotId, explicitManifestId));
+                        }
                     }
-
-                    var zippedDepotManifest = depotIdList.Zip(manifestIdList, (depotId, manifestId) => (depotId, manifestId));
-                    depotManifestIds.AddRange(zippedDepotManifest);
-                }
-                else
-                {
-                    depotManifestIds.AddRange(depotIdList.Select(depotId => (depotId, ContentDownloader.INVALID_MANIFEST_ID)));
+                    else
+                    {
+                        if (uint.TryParse(depotRef, out var depotId))
+                        {
+                            depotManifestIds.Add((depotId, ContentDownloader.INVALID_MANIFEST_ID));
+                        }
+                    }
                 }
 
                 PrintUnconsumedArgs(args);
@@ -399,7 +506,6 @@ namespace DepotDownloader
                         }
                         else
                         {
-                            // Avoid console echoing of password
                             password = Util.ReadPassword();
                         }
 
@@ -519,10 +625,13 @@ namespace DepotDownloader
 
         static void PrintUsage()
         {
-            // Do not use tabs to align parameters here because tab size may differ
+            Console.WriteLine();
+            Console.WriteLine("Usage: querying app info (read-only)");
+            Console.WriteLine("       depotdownloader info --app <id> [-username <user> [-password <pass>]]");
+            Console.WriteLine("       Outputs JSON with app name, Windows launch exe path, and DLC list.");
             Console.WriteLine();
             Console.WriteLine("Usage: downloading one or all depots for an app:");
-            Console.WriteLine("       depotdownloader -app <id> [-depot <id> [-manifest <id>]]");
+            Console.WriteLine("       depotdownloader -app <id> [-depot <id>[:<manifestGid>]]");
             Console.WriteLine("                       [-username <username> [-password <password>]] [other options]");
             Console.WriteLine();
             Console.WriteLine("Usage: downloading a workshop item using pubfile id");
@@ -532,8 +641,8 @@ namespace DepotDownloader
             Console.WriteLine();
             Console.WriteLine("Parameters:");
             Console.WriteLine("  -app <#>                 - the AppID to download.");
-            Console.WriteLine("  -depot <#>               - the DepotID to download.");
-            Console.WriteLine("  -manifest <id>           - manifest id of content to download (requires -depot, default: current for branch).");
+            Console.WriteLine("  -depot <id>[:<manifestGid>] - the DepotID to download. Append :<manifestGid> to use a specific manifest.");
+            Console.WriteLine("  -manifest-dir <dir>     - directory containing {depotId}_{manifestGid}.manifest files to load locally (skips CDN manifest download). When used with -app, auto-discovers all app and DLC depots.");
             Console.WriteLine($"  -branch <branchname>    - download from specified branch if available (default: {ContentDownloader.DEFAULT_BRANCH}).");
             Console.WriteLine("  -branchpassword <pass>   - branch password if applicable.");
             Console.WriteLine("  -all-platforms           - downloads all platform-specific depots when -app is used.");
@@ -568,7 +677,6 @@ namespace DepotDownloader
             Console.WriteLine("  -debug                   - enable verbose debug logging.");
             Console.WriteLine("  -V or --version          - print version and runtime.");
             Console.WriteLine("  -depotkeys <file>        - a list of depot keys to use ('depotID;hexKey' per line).");
-            Console.WriteLine("  -manifestfile <file>     - Use Specified Manifest file from Steam.");
             Console.WriteLine("  -apptoken <#>            - Use Specified App Access Token.");
             Console.WriteLine("  -packagetoken <#>        - Use Specified Package Access Token.");
         }

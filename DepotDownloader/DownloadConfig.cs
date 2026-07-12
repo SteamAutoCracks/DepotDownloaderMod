@@ -35,5 +35,8 @@ namespace DepotDownloader
 
         public bool UseManifestFile { get; set; }
         public string ManifestFile { get; set; }
+        public string ManifestDirectory { get; set; }
+
+        public bool JsonOutput { get; set; }
     }
 }

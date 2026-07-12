@@ -10,6 +10,7 @@ using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using DepotDownloaderMod.Models;
 using SteamKit2;
 using SteamKit2.CDN;
 
@@ -403,6 +404,48 @@ namespace DepotDownloader
             File.Move(fileStagingPath, fileFinalPath);
         }
 
+        // === NEW: Auto Download Mode entry point ===
+        /// <summary>
+        /// Auto-download mode: fetches all public depots for the given app via SteamCmdApi,
+        /// then downloads each depot using the standard pipeline.
+        /// </summary>
+        public static async Task DownloadAppAsync(uint appId)
+        {
+            Console.WriteLine("Auto Download Mode: fetching depot list for app {0}...", appId);
+
+            var depots = await SteamCmdApi.GetDepotsAsync(appId);
+
+            if (depots.Count == 0)
+            {
+                Console.WriteLine("No public depots found for app {0}.", appId);
+                return;
+            }
+
+            Console.WriteLine("Found {0} depot(s):", depots.Count);
+            foreach (var d in depots)
+            {
+                Console.WriteLine("  Depot {0} (Manifest {1})", d.DepotId, d.ManifestId);
+            }
+
+            // Build the list of (depotId, manifestId) tuples
+            var depotManifestIds = depots
+                .Select(d => (d.DepotId, d.ManifestId))
+                .ToList();
+
+            // Delegate to the existing full download method with default parameters
+            await DownloadAppAsync(
+                appId,
+                depotManifestIds,
+                branch: DEFAULT_BRANCH,
+                os: null,
+                arch: null,
+                language: null,
+                lv: false,
+                isUgc: false
+            );
+        }
+        // === END NEW ===
+
         public static async Task DownloadAppAsync(uint appId, List<(uint depotId, ulong manifestId)> depotManifestIds, string branch, string os, string arch, string language, bool lv, bool isUgc)
         {
             cdnPool = new CDNClientPool(steam3, appId);
@@ -550,7 +593,6 @@ namespace DepotDownloader
                 throw;
             }
         }
-
         static async Task<DepotDownloadInfo> GetDepotInfo(uint depotId, uint appId, ulong manifestId, string branch)
         {
             if (steam3 != null && appId != INVALID_APP_ID)
@@ -588,12 +630,12 @@ namespace DepotDownloader
             if (DepotKeyStore.ContainsKey(depotId))
             {
                 depotKey = DepotKeyStore.Get(depotId);
-                steam3.DepotKeys.Add(depotId,depotKey);
+                steam3.DepotKeys.Add(depotId, depotKey);
             }
             else
             {
                 await steam3.RequestDepotKey(depotId, appId);
-            }            
+            }
             if (!steam3.DepotKeys.TryGetValue(depotId, out depotKey))
             {
                 Console.WriteLine("No valid depot key for {0}, unable to download.", depotId);
@@ -1353,7 +1395,6 @@ namespace DepotDownloader
                 Console.WriteLine("{0,6:#00.00}% {1}", (sizeDownloaded / (float)depotDownloadCounter.completeDownloadSize) * 100.0f, fileFinalPath);
             }
         }
-
         class ChunkIdComparer : IEqualityComparer<byte[]>
         {
             public bool Equals(byte[] x, byte[] y)
@@ -1372,6 +1413,107 @@ namespace DepotDownloader
             }
         }
 
+
+        // ── AppInfo Query ─────────────────────────────────────────────────────────
+
+        internal static async Task<AppInfoQueryResult> QueryAppInfoAsync(uint appId)
+        {
+            var result = new AppInfoQueryResult { AppId = appId, Success = true };
+
+            await steam3.RequestAppInfo(appId);
+
+            if (!steam3.AppInfo.TryGetValue(appId, out var app) || app == null)
+            {
+                result.Success = false;
+                result.Error = $"AppId {appId} not found or no access";
+                return result;
+            }
+
+            result.AppName = GetAppName(appId);
+            result.LaunchPath = GetWindowsLaunchPath(appId);
+
+            var visitedDlcs = new HashSet<uint>();
+            var dlcList = new List<DlcInfo>();
+
+            var extended = GetSteam3AppSection(appId, EAppInfoSection.Extended);
+            if (extended != null)
+            {
+                var listofdlc = extended["listofdlc"];
+                if (listofdlc != KeyValue.Invalid && listofdlc.Value != null)
+                {
+                    var dlcAppIds = ParseDlcAppIdList(listofdlc.Value);
+                    await CollectDlcsRecursive(dlcAppIds, visitedDlcs, dlcList);
+                }
+            }
+
+            result.Dlcs = dlcList;
+            return result;
+        }
+
+        static string GetWindowsLaunchPath(uint appId)
+        {
+            var config = GetSteam3AppSection(appId, EAppInfoSection.Config);
+            if (config == null) return "";
+
+            var launch = config["launch"];
+            if (launch == KeyValue.Invalid) return "";
+
+            foreach (var entry in launch.Children)
+            {
+                if (entry == KeyValue.Invalid) continue;
+
+                var oslist = entry["oslist"].Value;
+
+                // Empty/missing oslist means default entry (applies to all platforms including Windows)
+                if (string.IsNullOrEmpty(oslist) || oslist.Contains("windows", StringComparison.OrdinalIgnoreCase))
+                {
+                    var executable = entry["executable"].Value;
+                    if (executable != null) return executable;
+
+                    executable = entry["exe"].Value;
+                    if (executable != null) return executable;
+                }
+            }
+
+            return "";
+        }
+
+        static async Task CollectDlcsRecursive(IEnumerable<uint> dlcAppIds, HashSet<uint> visited, List<DlcInfo> results)
+        {
+            foreach (var dlcAppId in dlcAppIds)
+            {
+                if (!visited.Add(dlcAppId)) continue;
+
+                await steam3.RequestAppInfo(dlcAppId);
+
+                var dlcName = GetAppName(dlcAppId);
+                results.Add(new DlcInfo { DlcAppId = dlcAppId, DlcName = dlcName });
+
+                if (steam3.AppInfo.TryGetValue(dlcAppId, out var dlcApp) && dlcApp != null)
+                {
+                    var dlcExtended = GetSteam3AppSection(dlcAppId, EAppInfoSection.Extended);
+                    if (dlcExtended != null)
+                    {
+                        var dlcListofdlc = dlcExtended["listofdlc"];
+                        if (dlcListofdlc != KeyValue.Invalid && dlcListofdlc.Value != null)
+                        {
+                            var nestedIds = ParseDlcAppIdList(dlcListofdlc.Value);
+                            await CollectDlcsRecursive(nestedIds, visited, results);
+                        }
+                    }
+                }
+            }
+        }
+
+        static IEnumerable<uint> ParseDlcAppIdList(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) yield break;
+
+            foreach (var part in value.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (uint.TryParse(part, out var id)) yield return id;
+            }
+        }
         static void DumpManifestToTextFile(DepotDownloadInfo depot, DepotManifest manifest)
         {
             var txtManifest = Path.Combine(depot.InstallDir, $"manifest_{depot.DepotId}_{depot.ManifestId}.txt");

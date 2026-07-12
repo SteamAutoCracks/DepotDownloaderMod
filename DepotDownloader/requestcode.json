@@ -1,0 +1,20 @@
+{
+  "providers": [
+    {
+      "manifestIds": ["*"],
+      "url": "https://manifest.steam.ooo/{manifestId}",
+      "timeoutMs": 5000,
+      "userAgent": null,
+      "headers": {},
+      "responseFormat": "plaintext"
+    },
+    {
+      "manifestIds": ["*"],
+      "url": "https://manifest.opensteamtool.com/{manifestId}",
+      "timeoutMs": 5000,
+      "userAgent": "OpenSteamTool/1.0",
+      "headers": {},
+      "responseFormat": "plaintext"
+    }
+  ]
+}

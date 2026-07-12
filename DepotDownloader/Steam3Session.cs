@@ -50,11 +50,10 @@ namespace DepotDownloader
         bool bDidDisconnect;
         bool bIsConnectionRecovery;
         int connectionBackoff;
-        int seq; // more hack fixes
+        int seq;
         AuthSession authSession;
         readonly CancellationTokenSource abortedToken = new();
 
-        // input
         readonly SteamUser.LogOnDetails logonDetails;
 
         public Steam3Session(SteamUser.LogOnDetails details)
@@ -65,6 +64,8 @@ namespace DepotDownloader
             var clientConfiguration = SteamConfiguration.Create(config =>
                 config
                     .WithHttpClientFactory(HttpClientFactory.CreateHttpClient)
+                    .WithWebAPIBaseAddress(new Uri("https://api.steamchina.com/"))
+                    .WithCellID(7)
             );
 
             this.steamClient = new SteamClient(clientConfiguration);
@@ -139,7 +140,9 @@ namespace DepotDownloader
                 //
             }
         }
-
+        /// <summary>
+        /// 请求 App 信息，Token 获取优先级：命令行 -> JSON 缓存 -> Steam 动态 -> 无 Token
+        /// </summary>
         public async Task RequestAppInfo(uint appId, bool bForce = false)
         {
             if ((AppInfo.ContainsKey(appId) && !bForce) || bAborted)
@@ -159,15 +162,23 @@ namespace DepotDownloader
 
             var request = new SteamApps.PICSRequest(appId);
 
-            if (AppTokens.TryGetValue(appId, out var token))
-            {
-                request.AccessToken = token;
-            }
-
+            // ---- 修改点：多级 Token 获取 ----
             if (TokenCFG.useAppToken)
             {
+                // 第一优先级：命令行指定的 Token
                 request.AccessToken = TokenCFG.appToken;
             }
+            else if (AppAccessTokenManager.TryGet(appId, out var cachedToken))
+            {
+                // 第二优先级：JSON 缓存中的 Token
+                request.AccessToken = cachedToken;
+            }
+            else if (AppTokens.TryGetValue(appId, out var dynamicToken))
+            {
+                // 第三优先级：Steam 动态获取的 Token
+                request.AccessToken = dynamicToken;
+            }
+            // 第四优先级：无 Token，走普通流程
 
             var appInfoMultiple = await steamApps.PICSGetProductInfo([request], []);
 
@@ -179,6 +190,12 @@ namespace DepotDownloader
 
                     Console.WriteLine("Got AppInfo for {0}", app.ID);
                     AppInfo[app.ID] = app;
+
+                    // 如果成功获取到 AppInfo，并且有 Token，则缓存到 JSON
+                    if (AppTokens.TryGetValue(app.ID, out var finalToken))
+                    {
+                        AppAccessTokenManager.Set(app.ID, finalToken);
+                    }
                 }
 
                 foreach (var app in appInfo.UnknownApps)
@@ -264,13 +281,13 @@ namespace DepotDownloader
             DepotKeys[depotKey.DepotID] = depotKey.DepotKey;
         }
 
-
+        // === 修改点：委托给 ManifestRequestCodeProvider ===
         public async Task<ulong> GetDepotManifestRequestCodeAsync(uint depotId, uint appId, ulong manifestId, string branch)
         {
             if (bAborted)
                 return 0;
 
-            var requestCode = await steamContent.GetManifestRequestCode(depotId, appId, manifestId, branch);
+            var requestCode = await ManifestRequestCodeProvider.GetRequestCodeAsync(manifestId);
 
             if (requestCode == 0)
             {
@@ -324,19 +341,32 @@ namespace DepotDownloader
             }
         }
 
+        /// <summary>
+        /// 获取私有 Beta 仓库信息，Token 获取优先级同 RequestAppInfo
+        /// </summary>
         public async Task<KeyValue> GetPrivateBetaDepotSection(uint appid, string branch)
         {
-            if (!AppBetaPasswords.TryGetValue(branch, out var branchPassword)) // Should be filled by CheckAppBetaPassword
+            if (!AppBetaPasswords.TryGetValue(branch, out var branchPassword))
             {
                 return new KeyValue();
             }
 
-            AppTokens.TryGetValue(appid, out var accessToken); // Should be filled by RequestAppInfo
+            // ---- 修改点：多级 Token 获取 ----
+            ulong accessToken = 0;
 
             if (TokenCFG.useAppToken)
             {
                 accessToken = TokenCFG.appToken;
             }
+            else if (AppAccessTokenManager.TryGet(appid, out var cachedToken))
+            {
+                accessToken = cachedToken;
+            }
+            else if (AppTokens.TryGetValue(appid, out var dynamicToken))
+            {
+                accessToken = dynamicToken;
+            }
+            // 若无 Token，accessToken 保持 0
 
             var privateBeta = await steamApps.PICSGetPrivateBeta(appid, accessToken, branch, branchPassword);
 
@@ -360,7 +390,6 @@ namespace DepotDownloader
             throw new Exception($"EResult {(int)details.Result} ({details.Result}) while retrieving file details for pubfile {pubFile}.");
         }
 
-
         public async Task<SteamCloud.UGCDetailsCallback> GetUGCDetails(UGCHandle ugcHandle)
         {
             var callback = await steamCloud.RequestUGCDetails(ugcHandle);
@@ -376,7 +405,6 @@ namespace DepotDownloader
 
             throw new Exception($"EResult {(int)callback.Result} ({callback.Result}) while retrieving UGC details for {ugcHandle}.");
         }
-
         private void ResetConnectionFlags()
         {
             bExpectingDisconnectRemote = false;
@@ -433,8 +461,6 @@ namespace DepotDownloader
             Console.WriteLine(" Done!");
             bConnecting = false;
 
-            // Update our tracking so that we don't time out, even if we need to reconnect multiple times,
-            // e.g. if the authentication phase takes a while and therefore multiple connections.
             connectionBackoff = 0;
 
             if (!authenticatedUser)
@@ -491,7 +517,6 @@ namespace DepotDownloader
 
                             authSession = session;
 
-                            // Steam will periodically refresh the challenge url, so we need a new QR code.
                             session.ChallengeURLChanged = () =>
                             {
                                 Console.WriteLine();
@@ -500,7 +525,6 @@ namespace DepotDownloader
                                 DisplayQrCode(session.ChallengeURL);
                             };
 
-                            // Draw initial QR code immediately
                             DisplayQrCode(session.ChallengeURL);
                         }
                         catch (TaskCanceledException)
@@ -565,12 +589,9 @@ namespace DepotDownloader
 
             DebugLog.WriteLine(nameof(Steam3Session), $"Disconnected: bIsConnectionRecovery = {bIsConnectionRecovery}, UserInitiated = {disconnected.UserInitiated}, bExpectingDisconnectRemote = {bExpectingDisconnectRemote}");
 
-            // When recovering the connection, we want to reconnect even if the remote disconnects us
             if (!bIsConnectionRecovery && (disconnected.UserInitiated || bExpectingDisconnectRemote))
             {
                 Console.WriteLine("Disconnected from Steam");
-
-                // Any operations outstanding need to be aborted
                 bAborted = true;
             }
             else if (connectionBackoff >= 10)
@@ -593,7 +614,6 @@ namespace DepotDownloader
 
                 Thread.Sleep(1000 * connectionBackoff);
 
-                // Any connection related flags need to be reset here to match the state after Connect
                 ResetConnectionFlags();
                 steamClient.Connect();
             }
@@ -633,7 +653,6 @@ namespace DepotDownloader
                     AccountSettingsStore.Instance.LoginTokens.Remove(logonDetails.Username);
                     AccountSettingsStore.Save();
 
-                    // TODO: Handle gracefully by falling back to password prompt?
                     Console.WriteLine($"Access token was rejected ({loggedOn.Result}).");
                     Abort(false);
                     return;
@@ -656,9 +675,7 @@ namespace DepotDownloader
             if (loggedOn.Result == EResult.TryAnotherCM)
             {
                 Console.Write("Retrying Steam3 connection (TryAnotherCM)...");
-
                 Reconnect();
-
                 return;
             }
 
@@ -666,7 +683,6 @@ namespace DepotDownloader
             {
                 Console.WriteLine("Unable to login to Steam3: {0}", loggedOn.Result);
                 Abort(false);
-
                 return;
             }
 
@@ -674,7 +690,6 @@ namespace DepotDownloader
             {
                 Console.WriteLine("Unable to login to Steam3: {0}", loggedOn.Result);
                 Abort();
-
                 return;
             }
 
@@ -696,7 +711,6 @@ namespace DepotDownloader
             {
                 Console.WriteLine("Unable to get license list: {0} ", licenseList.Result);
                 Abort();
-
                 return;
             }
 
@@ -714,7 +728,6 @@ namespace DepotDownloader
 
         private static void DisplayQrCode(string challengeUrl)
         {
-            // Encode the link as a QR code
             using var qrGenerator = new QRCodeGenerator();
             var qrCodeData = qrGenerator.CreateQrCode(challengeUrl, QRCodeGenerator.ECCLevel.L);
             using var qrCode = new AsciiQRCode(qrCodeData);

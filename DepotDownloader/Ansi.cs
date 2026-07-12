@@ -30,7 +30,7 @@ static class Ansi
         {
             return;
         }
-        
+
         if (OperatingSystem.IsLinux())
         {
             return;
