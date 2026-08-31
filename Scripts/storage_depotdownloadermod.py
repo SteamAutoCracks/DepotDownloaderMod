@@ -399,7 +399,7 @@ async def get_manifest(app_id: str, sha: str, path: str, repo: str) -> list:
     return collected_depots
 
 async def get_data(app_id: str, path: str, repo: str) -> list:
-    AppInfo = collections.namedtuple('AppInfo', ['Appid','Licenses', 'App', 'Depots', 'EncryptedAppTicket', 'AppOwnershipTicket'])
+    AppInfo = collections.namedtuple('AppInfo', ['Appid','Licenses', 'App', 'Depots', 'EncryptedAppTicket', 'AppOwnershipTicket', 'unknown', 'GameConnectAuthTicket'])
     collected_depots = []
     depot_cache_path = Path(os.getcwd())
     try:
