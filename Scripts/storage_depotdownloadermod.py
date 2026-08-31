@@ -16,12 +16,13 @@ import struct
 import pygob
 import collections
 import hashlib
+import hmac
 from typing import Any
 from pathlib import Path
 from colorama import init, Fore, Back, Style
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
 
 init()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -232,6 +233,104 @@ def decrypt_ks_text(text: str) -> str:
         lambda m: m.group(1) + decrypt_ks_string(m.group(2)) + m.group(3), text
     )
 
+
+# ShikiLuaQwQ 仓库与加密常量
+QWQ_RAW_GITHUB_ROOT = "https://raw.githubusercontent.com"
+QWQ_REPO_OWNER = "ShikieikiC"
+QWQ_REPO_NAME = "ShikiLuaQwQ"
+QWQ_BRANCH = "main"
+QWQ_ROOT_DIR = "QwQ"
+
+QWQ_BUCKET_KEY = "SHIKIEIKISUKI"
+QWQ_BUCKET_PREFIX = "SHIKI"
+QWQ_BUCKET_SUFFIX = "KAWAII"
+QWQ_BUCKET_COUNT = 400
+QWQ_BUCKET_HASH_LEN = 16
+
+QWQ_FILENAME_CRYPTO_KEY = "6325179eccb19fe387dcb64b85058d30a1b388dbe684eb1d79cb43e74bd6e931"
+QWQ_CONTENT_CRYPTO_KEY = "9f8a4fb9bd3322ee1eb83bb316a868918327fdd81b219a10a923b57dcf58f03e"
+
+QWQ_MAGIC = b"KSL3"
+QWQ_VERSION = b"\x01"
+QWQ_NONCE_SIZE = 12
+
+
+def get_qwq_bucket_name(app_id: int | str) -> str:
+    """根据 AppID 计算分桶目录"""
+    norm_id = str(app_id).strip()
+    h1 = hashlib.sha256((QWQ_BUCKET_KEY + norm_id).encode("utf-8")).digest()
+    bucket_idx = int.from_bytes(h1[:8], "big") % QWQ_BUCKET_COUNT
+    h2 = hashlib.sha256((QWQ_BUCKET_KEY + f"bucket:{bucket_idx}").encode("utf-8")).hexdigest()
+    return f"{QWQ_BUCKET_PREFIX}{h2[:QWQ_BUCKET_HASH_LEN]}{QWQ_BUCKET_SUFFIX}"
+
+
+def get_qwq_encrypted_file_name(app_id: int | str, bucket_name: str = None) -> str:
+    """根据 AppID 计算加密文件名"""
+    norm_id = str(app_id).strip()
+    if bucket_name is None:
+        bucket_name = get_qwq_bucket_name(norm_id)
+
+    name_key = hmac.new(
+        bytes.fromhex(QWQ_FILENAME_CRYPTO_KEY),
+        b"KSL3-NAME\x00" + bucket_name.strip().encode("utf-8"),
+        hashlib.sha256
+    ).digest()
+
+    nonce = hmac.new(name_key, norm_id.encode("utf-8"), hashlib.sha256).digest()[:12]
+    aesgcm = AESGCM(name_key)
+    ciphertext = aesgcm.encrypt(nonce, norm_id.encode("utf-8"), None)
+
+    payload = nonce + ciphertext
+    encoded = base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
+    return f"{encoded}.qwq"
+
+
+def decrypt_qwq_payload(payload: bytes, bucket_name: str, encrypted_name: str) -> str:
+    """
+    解密 .qwq 文件二进制数据
+    """
+    header = QWQ_MAGIC + QWQ_VERSION
+    if not payload.startswith(header):
+        raise ValueError(f"无效文件头！期望 {header}，实际为 {payload[:5]}")
+
+    offset = len(header)
+    nonce = payload[offset : offset + QWQ_NONCE_SIZE]
+    ciphertext = payload[offset + QWQ_NONCE_SIZE :]
+
+    # 1. 路径上下文
+    path_context = f"{bucket_name}/{encrypted_name}".encode("utf-8")
+
+    # 2. 派生 ChaCha20 解密 Key
+    content_key = hmac.new(
+        bytes.fromhex(QWQ_CONTENT_CRYPTO_KEY),
+        b"KSL3-CONTENT\x00" + path_context,
+        hashlib.sha256
+    ).digest()
+
+    # 3. 关联认证数据 (AAD): b"KSL3\x01\x00" + path_context
+    associated_data = QWQ_MAGIC + QWQ_VERSION + b"\x00" + path_context
+
+    # 4. ChaCha20-Poly1305 解密
+    cipher = ChaCha20Poly1305(content_key)
+    decrypted_bytes = cipher.decrypt(nonce, ciphertext, associated_data)
+
+    # 5. 去除 BOM 和首尾空白
+    text = decrypted_bytes.decode("utf-8", errors="ignore")
+    return text.lstrip("\ufeff").strip()
+
+
+def decrypt_qwq_file(file_path: str, bucket_name: str = None, app_id: str = None) -> str:
+    """
+    解密本地已保存的 .qwq 文件
+    """
+    filename = os.path.basename(file_path)
+    if bucket_name is None and app_id is not None:
+        bucket_name = get_qwq_bucket_name(app_id)
+    with open(file_path, "rb") as f:
+        payload = f.read()
+    return decrypt_qwq_payload(payload, bucket_name, filename)
+
+
 async def get(sha: str, path: str, repo: str):
     if os.environ.get('IS_CN') == 'yes':
         url_list = [
@@ -335,8 +434,9 @@ async def get_data_local(app_id: str) -> list:
         lua_file_path = depot_cache_path / f"{app_id}.lua"
         st_file_path = depot_cache_path / f"{app_id}.st"
         ks_file_path = depot_cache_path / f"{app_id}.ks"
-        if not lua_file_path.exists() and not st_file_path.exists() and not ks_file_path.exists():
-            log.error(f'未找到lua文件: {lua_file_path}、st文件: {st_file_path} 或 ks文件: {ks_file_path}')
+        qwq_file_path = depot_cache_path / f"{app_id}.qwq"
+        if not lua_file_path.exists() and not st_file_path.exists() and not ks_file_path.exists() and not qwq_file_path.exists():
+            log.error(f'未找到lua文件: {lua_file_path}、st文件: {st_file_path}、ks文件: {ks_file_path} 或 qwq文件: {qwq_file_path}')
             raise FileNotFoundError
 
         contents = []
@@ -347,6 +447,16 @@ async def get_data_local(app_id: str) -> list:
         if ks_file_path.exists():
             async with aiofiles.open(ks_file_path, 'r', encoding="utf-8", errors="ignore") as f:
                 contents.append(await f.read())
+
+        if qwq_file_path.exists():
+            async with aiofiles.open(qwq_file_path, 'rb') as f:
+                qwq_bytes = await f.read()
+            bucket = get_qwq_bucket_name(app_id)
+            enc_name = get_qwq_encrypted_file_name(app_id, bucket)
+            try:
+                contents.append(decrypt_qwq_payload(qwq_bytes, bucket, enc_name))
+            except Exception:
+                contents.append(decrypt_qwq_payload(qwq_bytes, bucket, qwq_file_path.name))
 
         if st_file_path.exists():
             async with aiofiles.open(st_file_path, 'rb') as f:
@@ -599,6 +709,68 @@ async def cysaw_download(app_id: str) -> bool:
         log.error(f'处理失败: {stack_error(e)}')
         raise
 
+async def shikilua_qwq_download(app_id: str) -> bool:
+    bucket = get_qwq_bucket_name(app_id)
+    filename = get_qwq_encrypted_file_name(app_id, bucket)
+    relative_path = f"{QWQ_ROOT_DIR}/{bucket}/{filename}"
+    repo = f"{QWQ_REPO_OWNER}/{QWQ_REPO_NAME}"
+    depot_cache_path = Path(os.getcwd())
+
+    if os.environ.get('IS_CN') == 'yes':
+        url_list = [
+            f'https://ghfast.top/https://raw.githubusercontent.com/{repo}/{QWQ_BRANCH}/{relative_path}',
+            f'https://jsdelivr.pai233.top/gh/{repo}@{QWQ_BRANCH}/{relative_path}',
+            f'https://cdn.jsdmirror.com/gh/{repo}@{QWQ_BRANCH}/{relative_path}',
+            f'https://raw.gitmirror.com/{repo}/{QWQ_BRANCH}/{relative_path}',
+            f'https://raw.dgithub.xyz/{repo}/{QWQ_BRANCH}/{relative_path}',
+            f'https://gh.akass.cn/{repo}/{QWQ_BRANCH}/{relative_path}',
+            f'https://raw.githubusercontent.com/{repo}/{QWQ_BRANCH}/{relative_path}'
+        ]
+    else:
+        url_list = [
+            f'https://raw.githubusercontent.com/{repo}/{QWQ_BRANCH}/{relative_path}'
+        ]
+
+    retry = 3
+    content = None
+    while retry > 0:
+        for url in url_list:
+            try:
+                r = await client.get(url, timeout=30)
+                if r.status_code == 200:
+                    content = r.read()
+                    break
+                elif r.status_code == 404:
+                    log.error(f'获取失败: {relative_path} - 状态码: 404')
+                    return False
+                else:
+                    log.error(f'获取失败: {relative_path} - 状态码: {r.status_code}')
+            except KeyboardInterrupt:
+                log.info("程序已退出")
+                return False
+            except httpx.ConnectError as e:
+                log.error(f'获取失败: {relative_path} - 连接错误: {str(e)}')
+            except httpx.ConnectTimeout as e:
+                log.error(f'连接超时: {url} - 错误: {str(e)}')
+        if content is not None:
+            break
+        retry -= 1
+        log.warning(f'重试剩余次数: {retry} - {relative_path}')
+
+    if not content:
+        log.error(f'超过最大重试次数: {relative_path}')
+        return False
+
+    try:
+        decrypted_lua = decrypt_qwq_payload(content, bucket, filename)
+        log.info(f"解密成功: {app_id}.lua")
+        async with aiofiles.open(depot_cache_path / f"{app_id}.lua", 'w', encoding="utf-8") as f:
+            await f.write(decrypted_lua)
+        return True
+    except Exception as e:
+        log.error(f'解密失败: {relative_path} - {stack_error(e)}')
+        return False
+
 async def main(app_id: str, repos: list) -> bool:
     app_id_list = list(filter(str.isdecimal, app_id.strip().split('-')))
     if not app_id_list:
@@ -643,6 +815,17 @@ async def main(app_id: str, repos: list) -> bool:
                     return True
             elif selected_repo == 'cysaw.top':
                 if(await cysaw_download(app_id)):
+                    manifests = await get_data_local(app_id)
+                    await depotdownloadermod_add(app_id, manifests)
+                    log.info('已添加下载文件')
+                    # log.info(f'清单最后更新时间: {latest_date}')
+                    log.info(f'导入成功: {app_id}')
+                    await client.aclose()
+                    os.system('pause')
+                    return True
+            elif selected_repo == 'ShikieikiC/ShikiLuaQwQ':
+                await checkcn()
+                if(await shikilua_qwq_download(app_id)):
                     manifests = await get_data_local(app_id)
                     await depotdownloadermod_add(app_id, manifests)
                     log.info('已添加下载文件')
@@ -721,13 +904,14 @@ if __name__ == '__main__':
             'Auiowu/ManifestAutoUpdate',
             'tymolu233/ManifestAutoUpdate',
             'SteamAutoCracks/ManifestHub',
+            'ShikieikiC/ShikiLuaQwQ',
             'PrintedWaste',
             'steambox.gdata.fun',
             'cysaw.top',
 #            'P-ToyStore/SteamManifestCache_Pro'
             'sean-who/ManifestAutoUpdate',
             'luckygametools/steam-cfg',
-            'Steam tools .lua/.st/.ks script (Local file)'
+            'Steam tools .lua/.st/.ks/.qwq script (Local file)'
         ]
         app_id = input(f"{Fore.CYAN}{Back.BLACK}{Style.BRIGHT}请输入游戏AppID: {Style.RESET_ALL}").strip()
         selected_repos = select_repo(repos)
