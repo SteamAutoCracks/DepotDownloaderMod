@@ -33,6 +33,10 @@ client = httpx.AsyncClient(trust_env=True, verify=False)
 DEPOTDOWNLOADER = "DepotDownloadermod.exe"
 DEPOTDOWNLOADER_ARGS = "-max-downloads 256 -verify-all"
 
+MANIFESTHUB_DOMAIN = "manifesthub2.filegear-sg.me"
+MANIFESTHUB_WEB_URL = f"https://{MANIFESTHUB_DOMAIN}/"
+MANIFESTHUB_API_URL = f"https://api.{MANIFESTHUB_DOMAIN}/manifest"
+
 DEFAULT_CONFIG = {
     "Github_Personal_Token": "",
     "Custom_Steam_Path": "",
@@ -477,27 +481,30 @@ async def get_data_local(app_id: str) -> list:
         content = "\n".join(contents)
         content = decrypt_ks_text(content)
 
-        keyfile = await aiofiles.open(depot_cache_path / f"{app_id}.key", 'w', encoding="utf-8")
-        # 解析 addappid/addtoken 和 setManifestid
-        addappid_pattern = re.compile(r'(?:addappid|addtoken)\s*\(\s*(\d+)\s*(?:,\s*\d+\s*,\s*"([0-9a-zA-Z]+)"\s*)?\)')
-        setmanifestid_pattern = re.compile(r'setManifestid\(\s*(\d+)\s*,\s*"(\d+)"\s*(?:,\s*\d+\s*)?\)')
+        async with aiofiles.open(depot_cache_path / f"{app_id}.key", 'w', encoding="utf-8") as keyfile:
+            # 解析 addappid/addtoken 和 setManifestid
+            addappid_pattern = re.compile(r'(?:addappid|addtoken)\s*\(\s*(\d+)\s*(?:,\s*\d+\s*,\s*["\']([0-9a-zA-Z]+)["\']\s*)?\)', re.IGNORECASE)
+            setmanifestid_pattern = re.compile(r'set[Mm]anifest[iI]d\s*\(\s*(\d+)\s*,\s*["\']?(\d+)["\']?(?:\s*,\s*["\']?(\d+)["\']?)?\s*\)')
 
-        for match in addappid_pattern.finditer(content):
-            depot_id = match.group(1)
-            decrypt_key = match.group(2) if match.group(2) else None
-            if decrypt_key:
-                log.info(f'解析到 addappid/addtoken: depot_id={depot_id}, decrypt_key={decrypt_key}')
-                await keyfile.write(f'{depot_id};{decrypt_key}\n')
+            for match in addappid_pattern.finditer(content):
+                depot_id = match.group(1)
+                decrypt_key = match.group(2) if match.group(2) else None
+                if decrypt_key:
+                    log.info(f'解析到 addappid/addtoken: depot_id={depot_id}, decrypt_key={decrypt_key}')
+                    await keyfile.write(f'{depot_id};{decrypt_key}\n')
 
+        seen_manifests = set()
         for match in setmanifestid_pattern.finditer(content):
             depot_id = match.group(1)
             manifest_id = match.group(2)
             filename = f"{depot_id}_{manifest_id}.manifest"
             save_path = depot_cache_path / filename
             log.info(f'解析到 setManifestid: depot_id={depot_id}, manifest_id={manifest_id}')
+            if filename not in seen_manifests:
+                seen_manifests.add(filename)
+                collected_depots.append(filename)
             if save_path.exists():
                 log.info(f'存在清单: {save_path}')
-                collected_depots.append(filename)
             else:
                 log.info(f'未找到清单: {save_path}')
             
@@ -508,6 +515,66 @@ async def get_data_local(app_id: str) -> list:
         raise
     return collected_depots
 
+async def check_and_download_missing_manifests(manifests: list):
+    """检测 manifest 文件是否存在，如有缺失则提示用户并从 API 下载"""
+    depot_cache_path = Path(os.getcwd())
+    missing_manifests = []
+    
+    for manifest in manifests:
+        m_name = Path(manifest).name
+        m_path = depot_cache_path / m_name
+        if not m_path.exists():
+            name = m_path.stem
+            parts = name.split('_')
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                missing_manifests.append((parts[0], parts[1], m_name, m_path))
+
+    if not missing_manifests:
+        log.info("所有 manifest 清单文件均已存在在本文件夹。")
+        return
+
+    log.warning(f"\n检测到 {len(missing_manifests)} 个 manifest 清单文件在本地不存在：")
+    for depot_id, manifest_id, m_name, _ in missing_manifests:
+        log.warning(f"  缺失: {m_name} (DepotID: {depot_id}, ManifestID: {manifest_id})")
+
+    user_choice = input(f"\n{Fore.YELLOW}是否下载缺失的 manifest 清单文件？(y/n): {Style.RESET_ALL}").strip().lower()
+    if user_choice not in ['y', 'yes', '是', '1']:
+        log.info("已跳过下载缺失的 manifest 文件。")
+        return
+
+    print(f"\n{Fore.CYAN}获取 API Key 地址: {Fore.GREEN}{MANIFESTHUB_WEB_URL}{Style.RESET_ALL} {Fore.CYAN}[Steam Manifest API Key Generator]{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}提示: API Key 不会保存到任何文件，每次均需手动输入。{Style.RESET_ALL}")
+    apikey = input(f"{Fore.CYAN}请输入 API Key: {Style.RESET_ALL}").strip()
+
+    if not apikey:
+        log.error("未输入 API Key，取消下载。")
+        return
+
+    for depot_id, manifest_id, m_name, m_path in missing_manifests:
+        url = f"{MANIFESTHUB_API_URL}?apikey={apikey}&depotid={depot_id}&manifestid={manifest_id}"
+        log.info(f"正在从 API 下载清单: {m_name} ...")
+        try:
+            r = await client.get(url, timeout=60)
+            if r.status_code == 200 and r.content:
+                if r.content.startswith(b'{') and b'"error"' in r.content:
+                    try:
+                        err_json = r.json()
+                        err_msg = err_json.get('error') or err_json.get('message') or r.text
+                        log.error(f"下载清单失败: {m_name} - API 返回错误: {err_msg}")
+                        continue
+                    except Exception:
+                        pass
+                async with aiofiles.open(m_path, 'wb') as f:
+                    await f.write(r.content)
+                log.info(f"清单下载成功: {m_name}")
+            else:
+                log.error(f"下载清单失败: {m_name} - HTTP 状态码: {r.status_code}")
+        except KeyboardInterrupt:
+            log.info("程序已退出")
+            return
+        except Exception as e:
+            log.error(f"下载清单异常: {m_name} - {stack_error(e)}")
+
 async def depotdownloadermod_add(app_id: str, manifests: list) -> bool:
     async with lock:
         log.info(f'DepotDownloader 下载文件生成: {app_id}.bat')
@@ -517,6 +584,8 @@ async def depotdownloadermod_add(app_id: str, manifests: list) -> bool:
                     depot_id = manifest[0:manifest.find('_')]
                     manifest_id = manifest[manifest.find('_') + 1:manifest.find('.')]
                     await bat_file.write(f'{DEPOTDOWNLOADER} -app {app_id} -depot {depot_id} -manifest {manifest_id} -manifestfile {manifest} -depotkeys {app_id}.key {DEPOTDOWNLOADER_ARGS}\n')
+            await check_and_download_missing_manifests(manifests)
+            return True
         except Exception as e:
             log.error(f'出现错误: {e}')
             return False
