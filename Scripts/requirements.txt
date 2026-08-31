@@ -1,8 +1,9 @@
-aiofiles==24.1.0
-colorama==0.4.6
-colorlog==6.8.2
-httpx==0.27.2
-rich==13.9.4
-ujson==5.10.0
+aiofiles
+colorama
+colorlog
+httpx
+rich
+ujson
 vdf
 steamclient
+cryptography

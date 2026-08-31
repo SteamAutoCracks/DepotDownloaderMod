@@ -15,11 +15,13 @@ import zlib
 import struct
 import pygob
 import collections
+import hashlib
 from typing import Any
 from pathlib import Path
 from colorama import init, Fore, Back, Style
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 init()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +203,35 @@ def csharp_gzip(b64_string):
     
     return decompressed_data.decode('utf-8')
 
+# 逆向提取的真实密钥
+KS_CRYPTO_KEY_SEED = (
+    "5c75bffb8ebf9cfbc3c83f7f557c4cdd3056406606d0355dac61a4001dde68a8"
+)
+KEY = hashlib.sha256(bytes.fromhex(KS_CRYPTO_KEY_SEED)).digest()
+CHACHA = ChaCha20Poly1305(KEY)
+
+
+def decrypt_ks_string(val: str) -> str:
+    if not val.startswith("shiki~"):
+        return val
+    enc = val[6:]
+    pad = (4 - len(enc) % 4) % 4
+    try:
+        raw = base64.urlsafe_b64decode(enc + "=" * pad)
+        nonce, ct = raw[:12], raw[12:]
+        return CHACHA.decrypt(nonce, ct, None).decode("utf-8")
+    except Exception:
+        return val
+
+
+def decrypt_ks_text(text: str) -> str:
+    pattern = re.compile(
+        r'((?:addappid|addtoken)\s*\(\s*\d+\s*(?:,\s*\d+\s*)?,\s*")([^"]*)(")'
+    )
+    return pattern.sub(
+        lambda m: m.group(1) + decrypt_ks_string(m.group(2)) + m.group(3), text
+    )
+
 async def get(sha: str, path: str, repo: str):
     if os.environ.get('IS_CN') == 'yes':
         url_list = [
@@ -303,42 +334,49 @@ async def get_data_local(app_id: str) -> list:
     try:
         lua_file_path = depot_cache_path / f"{app_id}.lua"
         st_file_path = depot_cache_path / f"{app_id}.st"
-        if not lua_file_path.exists() and not st_file_path.exists():
-            log.error(f'未找到lua文件: {lua_file_path} 或 st文件: {st_file_path}')
+        ks_file_path = depot_cache_path / f"{app_id}.ks"
+        if not lua_file_path.exists() and not st_file_path.exists() and not ks_file_path.exists():
+            log.error(f'未找到lua文件: {lua_file_path}、st文件: {st_file_path} 或 ks文件: {ks_file_path}')
             raise FileNotFoundError
+
+        contents = []
         if lua_file_path.exists():
-            luafile = await aiofiles.open(lua_file_path, 'r', encoding="utf-8")
-            content = await luafile.read()
-            await luafile.close()
+            async with aiofiles.open(lua_file_path, 'r', encoding="utf-8", errors="ignore") as f:
+                contents.append(await f.read())
+
+        if ks_file_path.exists():
+            async with aiofiles.open(ks_file_path, 'r', encoding="utf-8", errors="ignore") as f:
+                contents.append(await f.read())
 
         if st_file_path.exists():
-            stfile = await aiofiles.open(st_file_path, 'rb')
-            content = await stfile.read()
-            await stfile.close()
+            async with aiofiles.open(st_file_path, 'rb') as f:
+                st_bytes = await f.read()
             # 解析 header
-            header = content[:12]
+            header = st_bytes[:12]
             xorkey, size, xorkeyverify = struct.unpack('III', header)
             xorkey ^= 0xFFFEA4C8
             xorkey &= 0xFF
             # 解析 data
-            data = bytearray(content[12:12+size])
+            data = bytearray(st_bytes[12:12+size])
             for i in range(len(data)):
                 data[i] = data[i] ^ xorkey
             # 读取 data
             decompressed_data = zlib.decompress(data)
-            content = decompressed_data[512:].decode('utf-8')
-            
+            contents.append(decompressed_data[512:].decode('utf-8', errors="ignore"))
+
+        content = "\n".join(contents)
+        content = decrypt_ks_text(content)
 
         keyfile = await aiofiles.open(depot_cache_path / f"{app_id}.key", 'w', encoding="utf-8")
-        # 解析 addappid 和 setManifestid
-        addappid_pattern = re.compile(r'addappid\(\s*(\d+)\s*(?:,\s*\d+\s*,\s*"([0-9a-f]+)"\s*)?\)')
+        # 解析 addappid/addtoken 和 setManifestid
+        addappid_pattern = re.compile(r'(?:addappid|addtoken)\s*\(\s*(\d+)\s*(?:,\s*\d+\s*,\s*"([0-9a-zA-Z]+)"\s*)?\)')
         setmanifestid_pattern = re.compile(r'setManifestid\(\s*(\d+)\s*,\s*"(\d+)"\s*(?:,\s*\d+\s*)?\)')
 
         for match in addappid_pattern.finditer(content):
             depot_id = match.group(1)
             decrypt_key = match.group(2) if match.group(2) else None
             if decrypt_key:
-                log.info(f'解析到 addappid: depot_id={depot_id}, decrypt_key={decrypt_key}')
+                log.info(f'解析到 addappid/addtoken: depot_id={depot_id}, decrypt_key={decrypt_key}')
                 await keyfile.write(f'{depot_id};{decrypt_key}\n')
 
         for match in setmanifestid_pattern.finditer(content):
@@ -446,7 +484,7 @@ async def get_latest_repo_info(repos: list, app_id: str, headers) -> Any | None:
     latest_date = None
     selected_repo = None
     for repo in repos:
-        if repo == "luckygametools/steam-cfg" or repo == "Steam tools .lua/.st script (Local file)":
+        if repo == "luckygametools/steam-cfg" or repo.startswith("Steam tools"):
             continue
             
         url = f'https://api.github.com/repos/{repo}/branches/{app_id}'
@@ -474,7 +512,7 @@ async def printedwaste_download(app_id: str) -> bool:
         zip_mem = io.BytesIO(content)
         with zipfile.ZipFile(zip_mem) as zf:
             for file in zf.namelist():
-                if file.endswith(('.st', '.lua', '.manifest')):
+                if file.endswith(('.st', '.lua', '.ks', '.manifest')):
                     file_content = zf.read(file)
                     log.info(f"解压文件: {file}，大小: {len(file_content)} 字节")    
                     async with aiofiles.open(depot_cache_path / Path(file).name, 'wb') as f:
@@ -505,7 +543,7 @@ async def gdata_download(app_id: str) -> bool:
         zip_mem = io.BytesIO(content)
         with zipfile.ZipFile(zip_mem) as zf:
             for file in zf.namelist():
-                if file.endswith(('.st', '.lua', '.manifest')):
+                if file.endswith(('.st', '.lua', '.ks', '.manifest')):
                     file_content = zf.read(file)
                     log.info(f"解压文件: {file}，大小: {len(file_content)} 字节")    
                     async with aiofiles.open(depot_cache_path / Path(file).name, 'wb') as f:
@@ -539,7 +577,7 @@ async def cysaw_download(app_id: str) -> bool:
         zip_mem = io.BytesIO(content)
         with zipfile.ZipFile(zip_mem) as zf:
             for file in zf.namelist():
-                if file.endswith(('.st', '.lua', '.manifest')):
+                if file.endswith(('.st', '.lua', '.ks', '.manifest')):
                     file_content = zf.read(file)
                     log.info(f"解压文件: {file}，大小: {len(file_content)} 字节")    
                     async with aiofiles.open(depot_cache_path / Path(file).name, 'wb') as f:
@@ -574,7 +612,7 @@ async def main(app_id: str, repos: list) -> bool:
         try:
             if (selected_repo):
                 log.info(f'选择清单仓库: {selected_repo}')
-            if selected_repo == 'Steam tools .lua/.st script (Local file)':
+            if selected_repo.startswith('Steam tools'):
                 manifests = await get_data_local(app_id)
                 await depotdownloadermod_add(app_id, manifests)
                 log.info('已添加下载文件')
@@ -689,7 +727,7 @@ if __name__ == '__main__':
 #            'P-ToyStore/SteamManifestCache_Pro'
             'sean-who/ManifestAutoUpdate',
             'luckygametools/steam-cfg',
-            'Steam tools .lua/.st script (Local file)'
+            'Steam tools .lua/.st/.ks script (Local file)'
         ]
         app_id = input(f"{Fore.CYAN}{Back.BLACK}{Style.BRIGHT}请输入游戏AppID: {Style.RESET_ALL}").strip()
         selected_repos = select_repo(repos)
