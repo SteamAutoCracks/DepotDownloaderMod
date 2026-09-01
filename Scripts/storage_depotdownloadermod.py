@@ -973,7 +973,7 @@ if __name__ == '__main__':
             'Auiowu/ManifestAutoUpdate',
             'tymolu233/ManifestAutoUpdate',
             'SteamAutoCracks/ManifestHub',
-            'ShikieikiC/ShikiLuaQwQ',
+            'oureveryday/ShikiLuaQwQ_old',
             'PrintedWaste',
             'steambox.gdata.fun',
             'cysaw.top',
