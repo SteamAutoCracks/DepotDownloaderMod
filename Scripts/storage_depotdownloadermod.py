@@ -209,12 +209,8 @@ def csharp_gzip(b64_string):
     return decompressed_data.decode('utf-8')
 
 # 逆向提取的真实密钥
-KS_CRYPTO_KEY_SEED = (
-    "5c75bffb8ebf9cfbc3c83f7f557c4cdd3056406606d0355dac61a4001dde68a8"
-)
-KEY = hashlib.sha256(bytes.fromhex(KS_CRYPTO_KEY_SEED)).digest()
+KEY = bytes.fromhex("9a2eccf7d2f2807416c84f81f986816b1fd493247bfeb2b093b5b475a6a5f9b5")
 CHACHA = ChaCha20Poly1305(KEY)
-
 
 def decrypt_ks_string(val: str) -> str:
     if not val.startswith("shiki~"):
@@ -230,12 +226,13 @@ def decrypt_ks_string(val: str) -> str:
 
 
 def decrypt_ks_text(text: str) -> str:
-    pattern = re.compile(
-        r'((?:addappid|addtoken)\s*\(\s*\d+\s*(?:,\s*\d+\s*)?,\s*")([^"]*)(")'
+    # 替换所有形如 shiki~... 的加密字符串（支持单/双引号及各种调用位置）
+    text = re.sub(
+        r'shiki~[A-Za-z0-9_\-]+',
+        lambda m: decrypt_ks_string(m.group(0)),
+        text
     )
-    return pattern.sub(
-        lambda m: m.group(1) + decrypt_ks_string(m.group(2)) + m.group(3), text
-    )
+    return text
 
 
 # ShikiLuaQwQ 仓库与加密常量
@@ -291,7 +288,7 @@ def get_qwq_encrypted_file_name(app_id: int | str, bucket_name: str = None) -> s
 
 def decrypt_qwq_payload(payload: bytes, bucket_name: str, encrypted_name: str) -> str:
     """
-    解密 .qwq 文件二进制数据
+    解密 .qwq 文件二进制数据，并进行二次解密（ks 解密）
     """
     header = QWQ_MAGIC + QWQ_VERSION
     if not payload.startswith(header):
@@ -320,7 +317,10 @@ def decrypt_qwq_payload(payload: bytes, bucket_name: str, encrypted_name: str) -
 
     # 5. 去除 BOM 和首尾空白
     text = decrypted_bytes.decode("utf-8", errors="ignore")
-    return text.lstrip("\ufeff").strip()
+    text = text.lstrip("\ufeff").strip()
+
+    # 6. 二次解密：qwq 内容实为 ks 格式，进一步解密内部的 ks (shiki~) 字符串
+    return decrypt_ks_text(text)
 
 
 def decrypt_qwq_file(file_path: str, bucket_name: str = None, app_id: str = None) -> str:
@@ -973,7 +973,7 @@ if __name__ == '__main__':
             'Auiowu/ManifestAutoUpdate',
             'tymolu233/ManifestAutoUpdate',
             'SteamAutoCracks/ManifestHub',
-            'oureveryday/ShikiLuaQwQ_old',
+            'ShikieikiC/ShikiLuaQwQ',
             'PrintedWaste',
             'steambox.gdata.fun',
             'cysaw.top',
